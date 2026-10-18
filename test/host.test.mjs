@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import {
   apply,
+  buildForkContext,
   buildPredictionInput,
   normalizePrediction,
   recentDialogue,
@@ -32,11 +33,13 @@ function fakeSession(events) {
 test('resolveConfig supplies every default', () => {
   const config = resolveConfig(undefined)
   assert.equal(config.enabled, true)
+  assert.equal(config.mode, 'fork')
   assert.equal(config.maxTokens, 256)
   assert.equal(config.temperature, 0.4)
-  assert.equal(config.timeoutMs, 2000)
+  assert.equal(config.timeoutMs, 4000)
   assert.equal(config.maxPromptChars, 80)
   assert.equal(config.maxInputChars, 6000)
+  assert.equal(config.maxForkChars, 32000)
   assert.equal(config.skipSubagents, true)
   assert.equal(config.provider, undefined)
   assert.equal(config.model, undefined)
@@ -45,25 +48,39 @@ test('resolveConfig supplies every default', () => {
 test('resolveConfig rejects wrong types instead of propagating them', () => {
   const config = resolveConfig({
     enabled: 'no',
+    mode: 'unknown',
     maxTokens: 3.5,
     temperature: 9,
     timeoutMs: -1,
+    maxForkChars: 0,
     provider: '',
     model: 42,
   })
   assert.equal(config.enabled, true)
+  assert.equal(config.mode, 'fork')
   assert.equal(config.maxTokens, 256)
   assert.equal(config.temperature, 0.4)
-  assert.equal(config.timeoutMs, 2000)
+  assert.equal(config.timeoutMs, 4000)
+  assert.equal(config.maxForkChars, 32000)
   assert.equal(config.provider, undefined)
   assert.equal(config.model, undefined)
 })
 
 test('resolveConfig keeps valid overrides', () => {
-  const config = resolveConfig({ enabled: false, maxTokens: 32, timeoutMs: 900, provider: 'p', model: 'm' })
+  const config = resolveConfig({
+    enabled: false,
+    mode: 'digest',
+    maxTokens: 32,
+    timeoutMs: 900,
+    maxForkChars: 12000,
+    provider: 'p',
+    model: 'm',
+  })
   assert.equal(config.enabled, false)
+  assert.equal(config.mode, 'digest')
   assert.equal(config.maxTokens, 32)
   assert.equal(config.timeoutMs, 900)
+  assert.equal(config.maxForkChars, 12000)
   assert.equal(config.provider, 'p')
   assert.equal(config.model, 'm')
 })
@@ -74,6 +91,8 @@ test('normalizePrediction strips quotes, labels, bullets, and fences', () => {
   assert.equal(normalizePrediction('下一句：提交这些改动'), '提交这些改动')
   assert.equal(normalizePrediction('- commit the changes'), 'commit the changes')
   assert.equal(normalizePrediction('```text\nfix the failing test\n```'), 'fix the failing test')
+  assert.equal(normalizePrediction('Here is a suggestion: run the tests'), 'run the tests')
+  assert.equal(normalizePrediction('I suggest: continue'), 'continue')
 })
 
 test('normalizePrediction keeps only the first non-empty line', () => {
@@ -193,7 +212,7 @@ test('one completed turn publishes the prediction and the next turn without one 
     },
     logger: { warn() {} },
   }
-  apply({ inject: (_names, callback) => callback(scoped) }, { timeoutMs: 1000 })
+  apply({ inject: (_names, callback) => callback(scoped) }, { mode: 'digest', timeoutMs: 1000 })
 
   assert.ok(definition !== undefined)
   let state = definition.init({ id: 'session-2' })
@@ -249,6 +268,112 @@ test('an aborted turn keeps the previous prediction', async () => {
     { type: 'turn/end', data: { turn: 2, reason: { kind: 'aborted', reason: { kind: 'user' } } } },
   )
   assert.equal(aborted.text, 'old hint')
+})
+
+test('buildForkContext merges system text and appends the synthetic user turn', () => {
+  const conversation = [
+    { role: 'system', content: [{ type: 'text', text: 'SYSTEM' }] },
+    { role: 'developer', content: [{ type: 'text', text: 'DEVELOPER' }] },
+    { role: 'user', content: [{ type: 'text', text: 'first request' }] },
+    {
+      role: 'assistant',
+      content: [
+        { type: 'text', text: 'working' },
+        { type: 'tool-call', id: 'call-1', name: 'read', arguments: '{}' },
+      ],
+    },
+    { role: 'tool', content: [{ type: 'text', text: 'tool output' }], toolCallId: 'call-1' },
+    { role: 'assistant', content: [{ type: 'text', text: 'done' }] },
+  ]
+  const context = buildForkContext({ deriveMessages: () => conversation }, resolveConfig({}))
+  assert.ok(context !== undefined)
+  assert.equal(context.system, 'SYSTEM\n\nDEVELOPER')
+  assert.deepEqual(context.messages.map(message => message.role), ['user', 'assistant', 'assistant', 'user'])
+  assert.equal(context.messages[0].content[0].text, 'first request')
+  assert.equal(context.messages[1].content[0].text, 'working')
+  assert.equal(context.messages[3].content[0].text, 'Suggest my next message.')
+})
+
+test('buildForkContext keeps the newest window and starts at a user turn', () => {
+  const conversation = [
+    { role: 'system', content: [{ type: 'text', text: 'S' }] },
+    { role: 'user', content: [{ type: 'text', text: 'old request' }] },
+    { role: 'assistant', content: [{ type: 'text', text: 'old reply' }] },
+    { role: 'user', content: [{ type: 'text', text: 'new request' }] },
+    { role: 'assistant', content: [{ type: 'text', text: 'new reply' }] },
+  ]
+  const context = buildForkContext(
+    { deriveMessages: () => conversation },
+    resolveConfig({ maxForkChars: 20 }),
+  )
+  assert.ok(context !== undefined)
+  assert.deepEqual(context.messages.map(message => message.role), ['user', 'assistant', 'user'])
+  assert.equal(context.messages[0].content[0].text, 'new request')
+})
+
+test('buildForkContext returns undefined without conversational text', () => {
+  const context = buildForkContext(
+    { deriveMessages: () => [{ role: 'system', content: [{ type: 'text', text: 'S' }] }] },
+    resolveConfig({}),
+  )
+  assert.equal(context, undefined)
+})
+
+test('fork mode sends the parent transcript and the synthetic turn', async () => {
+  const conversation = [
+    { role: 'system', content: [{ type: 'text', text: 'SYSTEM' }] },
+    { role: 'developer', content: [{ type: 'text', text: 'DEVELOPER' }] },
+    { role: 'user', content: [{ type: 'text', text: 'Fix the test' }] },
+    { role: 'assistant', content: [{ type: 'text', text: 'The test passes.' }] },
+  ]
+  const session = {
+    id: 'session-4',
+    header: {},
+    deriveMessages: () => conversation,
+    ownEvents: () => [],
+    requestHeader: () => ({ config: { provider: 'p', model: 'm' } }),
+  }
+  const listeners = {}
+  let captured
+  let definition
+  const scoped = {
+    sessionProjections: { register(value) { definition = value; return () => {} } },
+    on(name, listener) {
+      listeners[name] = listener
+      return () => {}
+    },
+    get(name) {
+      if (name === 'sessions') return { get: id => (id === 'session-4' ? session : undefined) }
+      return undefined
+    },
+    llm: {
+      async prepareCall(config, _signal, configure) {
+        const controls = configure === undefined
+          ? config
+          : configure({ ...config }, { reasoning: { efforts: [{ id: 'low' }] } })
+        return {
+          config: controls,
+          stream: async function* (options) {
+            captured = options
+            yield { type: 'text-delta', index: 0, text: '继续修复测试' }
+            yield { type: 'finish', reason: { kind: 'stop' } }
+          },
+        }
+      },
+    },
+    logger: { warn() {} },
+  }
+  apply({ inject: (_names, callback) => callback(scoped) }, { mode: 'fork', timeoutMs: 1000 })
+  let state = definition.init({ id: 'session-4' })
+  await listeners['agent/turn-stopping']({ agent: { session }, turn: 1 })
+
+  assert.ok(captured !== undefined)
+  assert.equal(captured.system, 'SYSTEM\n\nDEVELOPER')
+  assert.equal(captured.messages.at(-1).content[0].text, 'Suggest my next message.')
+  assert.equal(captured.messages.some(message => message.role === 'tool'), false)
+
+  state = definition.apply(state, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+  assert.equal(state.text, '继续修复测试')
 })
 
 test('package.json declares the minimum supported dsh runtime', async () => {

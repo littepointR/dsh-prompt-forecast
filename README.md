@@ -11,27 +11,52 @@ projection, and the Client half renders it as gray text on the first line of an
 empty composer. Press **Tab** to accept it into the draft, or **Esc** to ignore
 that suggestion. Typing anything hides it; the text you typed is never replaced.
 
+The default mode is a Codex-style context fork: the parent's current text
+transcript plus one synthetic user turn, `Suggest my next message.`
+
 ## Requirements
 
 - **DSH `0.2.1-rc.2` or newer within `0.2.x`**, declared as `engines.dsh: ^0.2.1-rc.2`.
 - This plugin is built on the 0.2.1-rc.2 client and Host surfaces: the
   `conversation.input.overlay` composer slot, `InputActions.captureInsertion()` /
   `insertText()`, and the session-projection carrier fed by `agent/turn-stopping`.
-- `dsh plugin add` checks the range before installing, and profile startup checks
-  it again. An unmet range refuses to load the plugin; upgrade DSH or install a
+- `dsh plugin add` validates the range during installation and restores the
+  previous profile state when it does not match; profile startup checks it
+  again. An unmet range refuses to load the plugin; upgrade DSH or install a
   plugin release whose `engines.dsh` matches your runtime. A DSH `0.3` release
   will need a matching plugin release rather than an exemption.
 
 ## What it does
 
-- Predicts from the real conversation: recent human messages, the latest
-  assistant reply, and the tool names the turn used.
+- Fork mode (default) predicts from the full text transcript; digest mode uses a
+  compact JSON excerpt.
 - Writes in the language the user writes in, one short line.
 - Uses the route that served the turn (falling back to the profile default
   model), so no extra provider setup is required.
 - Skips subagent sessions and turns with no human input.
 - Fails silently: a slow, aborted, or failed prediction never surfaces an error
   in the conversation.
+
+## Prediction modes
+
+`mode: 'fork'` (default) mirrors the Codex composer-prediction shape. It takes
+the session's current text transcript — system and developer instructions plus
+user/assistant text — drops tool calls, tool results, reasoning, and attachment
+blocks, then appends one synthetic user turn:
+
+```text
+Suggest my next message.
+```
+
+The model's reply becomes the ghost line. No child session or session event is
+created; the fork is an in-memory message list for one auxiliary call. Because
+the whole transcript is sent, this mode costs more tokens and needs a larger
+`timeoutMs` than the digest mode.
+
+`mode: 'digest'` keeps the earlier lightweight path: a compact JSON excerpt
+(`recent_user_messages`, `latest_assistant_reply`, `tools_used`) with a short
+dedicated system prompt. Use it for cheap predictions or long sessions where
+sending the transcript is too expensive.
 
 ## Configuration
 
@@ -40,11 +65,13 @@ The row's `config` block in `cordis.patch.yml` overrides every default:
 | Field | Default | Meaning |
 |---|---|---|
 | `enabled` | `true` | `false` leaves the Host half unregistered |
+| `mode` | `fork` | `fork` = full transcript + `Suggest my next message.`; `digest` = compact JSON excerpt |
 | `maxTokens` | `256` | Output budget of the prediction request |
 | `temperature` | `0.4` | Sampling temperature |
-| `timeoutMs` | `2000` | Hard bound on the request; a slower answer is dropped |
+| `timeoutMs` | `4000` | Hard bound on the request; a slower answer is dropped |
 | `maxPromptChars` | `80` | Clip length of the predicted prompt |
-| `maxInputChars` | `6000` | Size bound of the conversation excerpt |
+| `maxForkChars` | `32000` | Character budget of the forked conversation window (system/developer text is always kept) |
+| `maxInputChars` | `6000` | Digest-mode excerpt size bound |
 | `skipSubagents` | `true` | Subagent sessions get no prediction |
 | `provider` | turn route | Explicit provider override |
 | `model` | turn route | Explicit model override |
@@ -72,7 +99,7 @@ needs no extra pnpm build approval.
 To pin the tagged release:
 
 ```bash
-dsh plugin --profile web add github:littepointR/dsh-prompt-forecast#v0.1.1
+dsh plugin --profile web add github:littepointR/dsh-prompt-forecast#v0.2.0
 ```
 
 The Desktop application's `desktop` profile is reserved for the Electron app, so

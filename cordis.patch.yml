@@ -3,11 +3,13 @@
 # overrides the defaults in index.js. Uncomment and edit a value to tune it:
 #
 #   enabled: true          # false leaves the Host half unregistered
+#   mode: fork             # fork = full transcript + "Suggest my next message."; digest = compact JSON
 #   maxTokens: 256         # output budget of the prediction request
 #   temperature: 0.4
-#   timeoutMs: 2000        # hard bound on the prediction request, in milliseconds
+#   timeoutMs: 4000        # hard bound on the prediction request, in milliseconds
 #   maxPromptChars: 80     # clip length of the predicted prompt
-#   maxInputChars: 6000    # size bound of the conversation excerpt
+#   maxForkChars: 32000    # fork-mode conversation window budget (system text always kept)
+#   maxInputChars: 6000    # digest-mode excerpt size bound
 #   skipSubagents: true    # subagent sessions get no prediction
 #   provider: ...          # explicit route; defaults to the turn's own model
 #   model: ...

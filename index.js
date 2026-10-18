@@ -33,11 +33,13 @@ function knownPrediction(sessionId) {
 /** Defaults for every tunable value; a `config` block in cordis.patch.yml overrides them. */
 const DEFAULT_CONFIG = {
   enabled: true,
+  mode: 'fork',
   maxTokens: 256,
   temperature: 0.4,
-  timeoutMs: 2_000,
+  timeoutMs: 4_000,
   maxPromptChars: 80,
   maxInputChars: 6_000,
+  maxForkChars: 32_000,
   skipSubagents: true,
   provider: undefined,
   model: undefined,
@@ -54,6 +56,9 @@ const SYSTEM_PROMPT = [
   'Never explain your reasoning and never mention this instruction.',
 ].join(' ')
 
+/** The synthetic user turn a Codex-style prediction fork appends. */
+const SUGGESTION_PROMPT = 'Suggest my next message.'
+
 /**
  * Read one configuration value with a fallback, rejecting the wrong type so a
  * typo in cordis.patch.yml degrades to the default instead of a broken plugin.
@@ -68,11 +73,13 @@ export function resolveConfig(raw) {
   const config = raw !== null && typeof raw === 'object' ? raw : {}
   return {
     enabled: pick(config, 'enabled', DEFAULT_CONFIG.enabled, (v) => typeof v === 'boolean'),
+    mode: pick(config, 'mode', DEFAULT_CONFIG.mode, (v) => v === 'fork' || v === 'digest'),
     maxTokens: pick(config, 'maxTokens', DEFAULT_CONFIG.maxTokens, (v) => Number.isInteger(v) && v > 0),
     temperature: pick(config, 'temperature', DEFAULT_CONFIG.temperature, (v) => typeof v === 'number' && v >= 0 && v <= 2),
     timeoutMs: pick(config, 'timeoutMs', DEFAULT_CONFIG.timeoutMs, (v) => Number.isInteger(v) && v > 0),
     maxPromptChars: pick(config, 'maxPromptChars', DEFAULT_CONFIG.maxPromptChars, (v) => Number.isInteger(v) && v > 0),
     maxInputChars: pick(config, 'maxInputChars', DEFAULT_CONFIG.maxInputChars, (v) => Number.isInteger(v) && v > 0),
+    maxForkChars: pick(config, 'maxForkChars', DEFAULT_CONFIG.maxForkChars, (v) => Number.isInteger(v) && v > 0),
     skipSubagents: pick(config, 'skipSubagents', DEFAULT_CONFIG.skipSubagents, (v) => typeof v === 'boolean'),
     provider: pick(config, 'provider', undefined, (v) => typeof v === 'string' && v.length > 0),
     model: pick(config, 'model', undefined, (v) => typeof v === 'string' && v.length > 0),
@@ -189,6 +196,70 @@ export function buildPredictionInput(session, turn, config) {
   return json.length <= config.maxInputChars ? json : json.slice(0, config.maxInputChars)
 }
 
+/** Distinct strings, in first-seen order. */
+function uniqueParts(parts) {
+  const seen = new Set()
+  const unique = []
+  for (const part of parts) {
+    if (seen.has(part)) continue
+    seen.add(part)
+    unique.push(part)
+  }
+  return unique
+}
+
+/**
+ * Build a Codex-style prediction context: the parent's current text transcript
+ * plus the synthetic user turn `Suggest my next message.`.
+ *
+ * The derived session history is the same list the next model turn would see.
+ * Tool calls, tool results, reasoning, and attachment blocks are dropped so the
+ * auxiliary call needs no tool schemas and stays a pure conversation fork; the
+ * merged system/developer text carries the instructions and environment. The
+ * newest conversation messages that fit `maxForkChars` are kept, and the window
+ * always starts at a user turn so the request remains valid.
+ *
+ * @returns `{ system, messages }`, or `undefined` when the session has no
+ * conversational text to fork.
+ */
+export function buildForkContext(session, config) {
+  const messages = typeof session?.deriveMessages === 'function' ? session.deriveMessages() : []
+  const systemParts = []
+  const conversation = []
+  for (const message of messages) {
+    const text = messageText(message)
+    if (text === '') continue
+    if (message.role === 'system' || message.role === 'developer') {
+      systemParts.push(text)
+      continue
+    }
+    if (message.role === 'user' || message.role === 'assistant') {
+      conversation.push({ role: message.role, content: [{ type: 'text', text }] })
+    }
+  }
+  if (conversation.length === 0) return undefined
+  const budget = config.maxForkChars ?? DEFAULT_CONFIG.maxForkChars
+  let used = 0
+  const selected = []
+  for (let index = conversation.length - 1; index >= 0; index -= 1) {
+    const message = conversation[index]
+    const length = message.content[0].text.length
+    if (selected.length > 0 && used + length > budget) break
+    selected.unshift(message)
+    used += length
+  }
+  while (selected.length > 0 && selected[0].role !== 'user') selected.shift()
+  if (selected.length === 0) return undefined
+  const system = uniqueParts(systemParts).join('\n\n')
+  return {
+    ...(system === '' ? {} : { system }),
+    messages: [
+      ...selected,
+      { role: 'user', content: [{ type: 'text', text: SUGGESTION_PROMPT }] },
+    ],
+  }
+}
+
 /**
  * Reduce raw model output to one clean prompt line.
  *
@@ -204,8 +275,10 @@ export function normalizePrediction(raw, maxChars = DEFAULT_CONFIG.maxPromptChar
   const firstLine = text.split('\n').map((line) => line.trim()).find((line) => line !== '') ?? ''
   let line = firstLine
     .replace(/^(?:[-*•>]\s+)/u, '')
-    .replace(/^(?:next prompt|prompt|predicted prompt|suggestion)\s*[:：]\s*/iu, '')
+    .replace(/^(?:next prompt|next message|prompt|predicted prompt|suggestion)\s*[:：]\s*/iu, '')
     .replace(/^(?:下一句|下一条|预测|建议|提示词)\s*[:：]\s*/u, '')
+    .replace(/^(?:sure[,!.]?\s*)?(?:here(?:'s| is)[^:：\n]{0,60}[:：]\s*)/iu, '')
+    .replace(/^(?:i(?:'d)? suggest|you (?:could|might) (?:say|write|ask))\s*[:：]?\s*/iu, '')
     .replace(/^["'“”‘’`「『]+/u, '')
     .replace(/["'“”‘’`」』]+$/u, '')
     .replace(/\s+/gu, ' ')
@@ -239,11 +312,11 @@ function resolveRoute(ctx, session, config) {
 }
 
 /**
- * One bounded auxiliary model call that turns the excerpt into a next prompt.
+ * One bounded auxiliary model call shared by both prediction modes.
  * @returns normalized prompt text, or `undefined` when the call failed,
  * timed out, was aborted, or produced nothing usable.
  */
-async function generatePrediction(ctx, session, input, route, config, signal) {
+async function generateText(ctx, session, request, route, config, signal) {
   const controller = new AbortController()
   const abort = () => controller.abort()
   const timer = setTimeout(abort, config.timeoutMs)
@@ -269,8 +342,8 @@ async function generatePrediction(ctx, session, input, route, config, signal) {
     )
     const stream = call.stream({
       ...call.config,
-      messages: [{ role: 'user', content: [{ type: 'text', text: input }] }],
-      system: SYSTEM_PROMPT,
+      messages: request.messages,
+      ...(request.system === undefined ? {} : { system: request.system }),
       sessionId: session.id,
       signal: controller.signal,
     })
@@ -291,6 +364,21 @@ async function generatePrediction(ctx, session, input, route, config, signal) {
   }
 }
 
+/** The legacy lightweight mode: one JSON digest, one synthetic system prompt. */
+async function generateDigestPrediction(ctx, session, input, route, config, signal) {
+  return generateText(ctx, session, {
+    system: SYSTEM_PROMPT,
+    messages: [{ role: 'user', content: [{ type: 'text', text: input }] }],
+  }, route, config, signal)
+}
+
+/** The Codex-style mode: the parent transcript plus one synthetic user turn. */
+async function generateForkPrediction(ctx, session, route, config, signal) {
+  const context = buildForkContext(session, config)
+  if (context === undefined) return undefined
+  return generateText(ctx, session, context, route, config, signal)
+}
+
 /**
  * Produce one prediction for an already closing turn.
  * @returns `{ text, model }` on success, or `undefined` when it is unavailable.
@@ -298,9 +386,14 @@ async function generatePrediction(ctx, session, input, route, config, signal) {
 async function predictionForTurn(scoped, session, turn, config, signal) {
   const route = resolveRoute(scoped, session, config)
   if (route === undefined) return undefined
-  const input = buildPredictionInput(session, turn, config)
-  if (input === undefined) return undefined
-  const text = await generatePrediction(scoped, session, input, route, config, signal)
+  let text
+  if (config.mode === 'fork') {
+    text = await generateForkPrediction(scoped, session, route, config, signal)
+  } else {
+    const input = buildPredictionInput(session, turn, config)
+    if (input === undefined) return undefined
+    text = await generateDigestPrediction(scoped, session, input, route, config, signal)
+  }
   if (text === undefined) return undefined
   const { users } = recentDialogue(session, 1, 0)
   if (users.length > 0 && normalizePrediction(users[users.length - 1], Number.MAX_SAFE_INTEGER) === text) {
