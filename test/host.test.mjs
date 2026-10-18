@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
 import {
   apply,
   buildPredictionInput,
@@ -248,4 +249,9 @@ test('an aborted turn keeps the previous prediction', async () => {
     { type: 'turn/end', data: { turn: 2, reason: { kind: 'aborted', reason: { kind: 'user' } } } },
   )
   assert.equal(aborted.text, 'old hint')
+})
+
+test('package.json declares the minimum supported dsh runtime', async () => {
+  const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
+  assert.equal(manifest.engines?.dsh, '^0.2.1-rc.2')
 })

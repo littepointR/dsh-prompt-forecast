@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-prompt-forecast",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
   "description": "Ghost-text next-prompt prediction in the DeepSeek Harness Web composer, accepted with Tab.",
@@ -14,7 +14,17 @@
   "bugs": {
     "url": "https://github.com/littepointR/dsh-prompt-forecast/issues"
   },
-  "keywords": ["dsh", "deepseek-harness", "plugin", "prompt", "prediction", "composer"],
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "plugin",
+    "prompt",
+    "prediction",
+    "composer"
+  ],
+  "engines": {
+    "dsh": "^0.2.1-rc.2"
+  },
   "scripts": {
     "test": "node --test test/host.test.mjs test/client.test.mjs",
     "check": "node --check index.js && node --check client.js && node --check test/host.test.mjs && node --check test/client.test.mjs"
@@ -36,7 +46,9 @@
     "LICENSE"
   ],
   "dsh": {
-    "bundle": { "patch": "./cordis.patch.yml" },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
     "client": {
       "platform": "web",
       "inject": [

@@ -11,6 +11,17 @@ projection, and the Client half renders it as gray text on the first line of an
 empty composer. Press **Tab** to accept it into the draft, or **Esc** to ignore
 that suggestion. Typing anything hides it; the text you typed is never replaced.
 
+## Requirements
+
+- **DSH `0.2.1-rc.2` or newer within `0.2.x`**, declared as `engines.dsh: ^0.2.1-rc.2`.
+- This plugin is built on the 0.2.1-rc.2 client and Host surfaces: the
+  `conversation.input.overlay` composer slot, `InputActions.captureInsertion()` /
+  `insertText()`, and the session-projection carrier fed by `agent/turn-stopping`.
+- `dsh plugin add` checks the range before installing, and profile startup checks
+  it again. An unmet range refuses to load the plugin; upgrade DSH or install a
+  plugin release whose `engines.dsh` matches your runtime. A DSH `0.3` release
+  will need a matching plugin release rather than an exemption.
+
 ## What it does
 
 - Predicts from the real conversation: recent human messages, the latest
@@ -61,7 +72,7 @@ needs no extra pnpm build approval.
 To pin the tagged release:
 
 ```bash
-dsh plugin --profile web add github:littepointR/dsh-prompt-forecast#v0.1.0
+dsh plugin --profile web add github:littepointR/dsh-prompt-forecast#v0.1.1
 ```
 
 The Desktop application's `desktop` profile is reserved for the Electron app, so

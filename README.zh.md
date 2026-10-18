@@ -4,6 +4,16 @@ DeepSeek Harness Web 输入框里的「下一句提示词」幽灵预测，交�
 
 每轮对话完成后，Host 半会让当前会话使用的模型预测用户最可能输入的下一条消息，通过客户端可见的 session projection 发布；Client 半在输入框为空时把这句话以灰色文字显示在第一行。按 **Tab** 写入草稿，按 **Esc** 忽略；开始输入后自动消失，已输入的内容不会被替换。
 
+## 依赖要求
+
+- **DSH `0.2.1-rc.2` 及以上、且仍在 `0.2.x` 范围内**，声明为 `engines.dsh: ^0.2.1-rc.2`。
+- 插件依赖 0.2.1-rc.2 的客户端与 Host 接口：`conversation.input.overlay` 输入框浮层
+  slot、`InputActions.captureInsertion()` / `insertText()`，以及由
+  `agent/turn-stopping` 驱动的 session projection。
+- `dsh plugin add` 安装前会检查该范围，profile 启动时还会再检查一次。范围不满足时
+  插件会被拒绝加载；请升级 DSH，或安装 `engines.dsh` 与当前运行时匹配的插件版本。
+  DSH `0.3` 需要插件发布对应版本，而不是靠豁免绕过检查。
+
 ## 行为
 
 - 基于真实对话预测：最近的人类消息、最新助手回复，以及本轮用到的工具名。
@@ -47,7 +57,7 @@ dsh web
 固定到已打标签的版本：
 
 ```bash
-dsh plugin --profile web add github:littepointR/dsh-prompt-forecast#v0.1.0
+dsh plugin --profile web add github:littepointR/dsh-prompt-forecast#v0.1.1
 ```
 
 Desktop 应用的 `desktop` profile 由 Electron 独占，CLI 会拒绝
