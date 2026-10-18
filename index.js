@@ -34,12 +34,13 @@ function knownPrediction(sessionId) {
 const DEFAULT_CONFIG = {
   enabled: true,
   mode: 'fork',
-  maxTokens: 256,
+  maxTokens: 512,
   temperature: 0.4,
-  timeoutMs: 4_000,
+  timeoutMs: 8_000,
   maxPromptChars: 80,
   maxInputChars: 6_000,
-  maxForkChars: 32_000,
+  maxForkChars: 12_000,
+  fallback: true,
   skipSubagents: true,
   provider: undefined,
   model: undefined,
@@ -80,6 +81,7 @@ export function resolveConfig(raw) {
     maxPromptChars: pick(config, 'maxPromptChars', DEFAULT_CONFIG.maxPromptChars, (v) => Number.isInteger(v) && v > 0),
     maxInputChars: pick(config, 'maxInputChars', DEFAULT_CONFIG.maxInputChars, (v) => Number.isInteger(v) && v > 0),
     maxForkChars: pick(config, 'maxForkChars', DEFAULT_CONFIG.maxForkChars, (v) => Number.isInteger(v) && v > 0),
+    fallback: pick(config, 'fallback', DEFAULT_CONFIG.fallback, (v) => typeof v === 'boolean'),
     skipSubagents: pick(config, 'skipSubagents', DEFAULT_CONFIG.skipSubagents, (v) => typeof v === 'boolean'),
     provider: pick(config, 'provider', undefined, (v) => typeof v === 'string' && v.length > 0),
     model: pick(config, 'model', undefined, (v) => typeof v === 'string' && v.length > 0),
@@ -284,6 +286,12 @@ export function normalizePrediction(raw, maxChars = DEFAULT_CONFIG.maxPromptChar
     .replace(/\s+/gu, ' ')
     .trim()
   if (line === '') return undefined
+  // `NONE` is the predictor's explicit "no useful suggestion" answer. Assistant
+  // voice means the model answered as the agent instead of writing as the user.
+  if (/^none[.!]?$/iu.test(line)) return undefined
+  if (/^(?:sure|certainly|of course|i(?:'ve| have) (?:updated|fixed|added|changed|implemented))\b/iu.test(line)) {
+    return undefined
+  }
   if (line.length > maxChars) {
     const cut = line.slice(0, maxChars)
     const lastSpace = cut.lastIndexOf(' ')
@@ -387,8 +395,27 @@ async function predictionForTurn(scoped, session, turn, config, signal) {
   const route = resolveRoute(scoped, session, config)
   if (route === undefined) return undefined
   let text
+  let mode = 'digest'
   if (config.mode === 'fork') {
+    mode = 'fork'
     text = await generateForkPrediction(scoped, session, route, config, signal)
+    if (text === undefined && config.fallback) {
+      // The full-transcript fork is the quality path; the compact digest is the
+      // cheap safety net when the fork times out, returns no text, or the route
+      // rejects the larger request.
+      const input = buildPredictionInput(session, turn, config)
+      if (input !== undefined) {
+        text = await generateDigestPrediction(
+          scoped,
+          session,
+          input,
+          route,
+          { ...config, timeoutMs: Math.min(config.timeoutMs, 4_000) },
+          signal,
+        )
+        if (text !== undefined) mode = 'digest'
+      }
+    }
   } else {
     const input = buildPredictionInput(session, turn, config)
     if (input === undefined) return undefined
@@ -399,7 +426,7 @@ async function predictionForTurn(scoped, session, turn, config, signal) {
   if (users.length > 0 && normalizePrediction(users[users.length - 1], Number.MAX_SAFE_INTEGER) === text) {
     return undefined
   }
-  return { text, model: route.model }
+  return { text, model: route.model, mode }
 }
 
 /**
@@ -423,7 +450,7 @@ export function apply(ctx, rawConfig) {
       init: (header) => {
         const known = knownPrediction(header.id)
         return known === undefined
-          ? { session: String(header.id), turn: 0, text: '', model: '', at: 0 }
+          ? { session: String(header.id), turn: 0, text: '', model: '', at: 0, mode: '' }
           : { session: String(header.id), ...known }
       },
       apply: (state, event) => {
@@ -434,14 +461,14 @@ export function apply(ctx, rawConfig) {
         if (entry !== undefined) {
           byTurn.delete(turn)
           if (byTurn.size === 0) pending.delete(state.session)
-          return { ...state, turn, text: entry.text, model: entry.model, at: entry.at }
+          return { ...state, turn, text: entry.text, model: entry.model, at: entry.at, mode: entry.mode }
         }
         // A completed turn with no prediction clears the previous hint; an
         // aborted turn keeps it, because that turn produced no new outcome to
         // predict from.
         if (event.data?.reason?.kind !== 'completed') return state
         if (state.text === '') return state
-        return { ...state, turn, text: '', model: '', at: 0 }
+        return { ...state, turn, text: '', model: '', at: 0, mode: '' }
       },
       wire: {
         viewSchema: JSON_SCHEMA,
@@ -451,12 +478,14 @@ export function apply(ctx, rawConfig) {
             text: state.text,
             model: state.model,
             at: state.at,
+            mode: state.mode,
           })
           return {
             turn: state.turn,
             text: state.text,
             model: state.model,
             at: state.at,
+            mode: state.mode,
           }
         },
       },
@@ -473,14 +502,15 @@ export function apply(ctx, rawConfig) {
         if (typeof turn !== 'number') return
         const result = await predictionForTurn(scoped, session, turn, config, payload.signal)
         if (result === undefined) return
-        if (scoped.get('sessions')?.get?.(session.id) === undefined) return
+        // The session is live by construction here: `turn-stopping` is emitted
+        // by its running Agent. `session/disposed` cleans any late entry.
         const key = String(session.id)
         let byTurn = pending.get(key)
         if (byTurn === undefined) {
           byTurn = new Map()
           pending.set(key, byTurn)
         }
-        byTurn.set(turn, { text: result.text, model: result.model, at: Date.now() })
+        byTurn.set(turn, { text: result.text, model: result.model, mode: result.mode, at: Date.now() })
       } catch (error) {
         // A failing prediction must never fail the turn it follows.
         scoped.logger?.warn?.('prompt-forecast: prediction failed: %o', error)

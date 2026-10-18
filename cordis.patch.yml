@@ -4,11 +4,12 @@
 #
 #   enabled: true          # false leaves the Host half unregistered
 #   mode: fork             # fork = full transcript + "Suggest my next message."; digest = compact JSON
-#   maxTokens: 256         # output budget of the prediction request
+#   maxTokens: 512         # output budget of the prediction request
 #   temperature: 0.4
-#   timeoutMs: 4000        # hard bound on the prediction request, in milliseconds
+#   timeoutMs: 8000        # hard bound on the prediction request, in milliseconds
 #   maxPromptChars: 80     # clip length of the predicted prompt
-#   maxForkChars: 32000    # fork-mode conversation window budget (system text always kept)
+#   maxForkChars: 12000    # fork-mode conversation window budget (system text always kept)
+#   fallback: true         # retry the compact digest when the fork yields no text
 #   maxInputChars: 6000    # digest-mode excerpt size bound
 #   skipSubagents: true    # subagent sessions get no prediction
 #   provider: ...          # explicit route; defaults to the turn's own model

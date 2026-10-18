@@ -34,12 +34,13 @@ test('resolveConfig supplies every default', () => {
   const config = resolveConfig(undefined)
   assert.equal(config.enabled, true)
   assert.equal(config.mode, 'fork')
-  assert.equal(config.maxTokens, 256)
+  assert.equal(config.maxTokens, 512)
   assert.equal(config.temperature, 0.4)
-  assert.equal(config.timeoutMs, 4000)
+  assert.equal(config.timeoutMs, 8000)
   assert.equal(config.maxPromptChars, 80)
   assert.equal(config.maxInputChars, 6000)
-  assert.equal(config.maxForkChars, 32000)
+  assert.equal(config.maxForkChars, 12000)
+  assert.equal(config.fallback, true)
   assert.equal(config.skipSubagents, true)
   assert.equal(config.provider, undefined)
   assert.equal(config.model, undefined)
@@ -53,15 +54,17 @@ test('resolveConfig rejects wrong types instead of propagating them', () => {
     temperature: 9,
     timeoutMs: -1,
     maxForkChars: 0,
+    fallback: 'yes',
     provider: '',
     model: 42,
   })
   assert.equal(config.enabled, true)
   assert.equal(config.mode, 'fork')
-  assert.equal(config.maxTokens, 256)
+  assert.equal(config.maxTokens, 512)
   assert.equal(config.temperature, 0.4)
-  assert.equal(config.timeoutMs, 4000)
-  assert.equal(config.maxForkChars, 32000)
+  assert.equal(config.timeoutMs, 8000)
+  assert.equal(config.maxForkChars, 12000)
+  assert.equal(config.fallback, true)
   assert.equal(config.provider, undefined)
   assert.equal(config.model, undefined)
 })
@@ -72,7 +75,8 @@ test('resolveConfig keeps valid overrides', () => {
     mode: 'digest',
     maxTokens: 32,
     timeoutMs: 900,
-    maxForkChars: 12000,
+    maxForkChars: 9000,
+    fallback: false,
     provider: 'p',
     model: 'm',
   })
@@ -80,7 +84,8 @@ test('resolveConfig keeps valid overrides', () => {
   assert.equal(config.mode, 'digest')
   assert.equal(config.maxTokens, 32)
   assert.equal(config.timeoutMs, 900)
-  assert.equal(config.maxForkChars, 12000)
+  assert.equal(config.maxForkChars, 9000)
+  assert.equal(config.fallback, false)
   assert.equal(config.provider, 'p')
   assert.equal(config.model, 'm')
 })
@@ -93,6 +98,8 @@ test('normalizePrediction strips quotes, labels, bullets, and fences', () => {
   assert.equal(normalizePrediction('```text\nfix the failing test\n```'), 'fix the failing test')
   assert.equal(normalizePrediction('Here is a suggestion: run the tests'), 'run the tests')
   assert.equal(normalizePrediction('I suggest: continue'), 'continue')
+  assert.equal(normalizePrediction('NONE'), undefined)
+  assert.equal(normalizePrediction("Sure, I've updated the file."), undefined)
 })
 
 test('normalizePrediction keeps only the first non-empty line', () => {
@@ -200,7 +207,7 @@ test('one completed turn publishes the prediction and the next turn without one 
           ? config
           : configure({ ...config }, { reasoning: { efforts: [{ id: 'low' }, { id: 'high' }] } })
         assert.equal(controls.reasoningEffort, 'low')
-        assert.equal(controls.maxTokens, 256)
+        assert.equal(controls.maxTokens, 512)
         return {
           config: controls,
           stream: async function* () {
@@ -222,11 +229,13 @@ test('one completed turn publishes the prediction and the next turn without one 
   assert.equal(state.turn, 1)
   assert.equal(state.text, 'Run the tests.')
   assert.equal(state.model, 'test-model')
+  assert.equal(state.mode, 'digest')
   assert.equal(definition.wire.view(state).text, 'Run the tests.')
 
   state = definition.apply(state, { type: 'turn/end', data: { turn: 2, reason: { kind: 'completed' } } })
   assert.equal(state.turn, 2)
   assert.equal(state.text, '')
+  assert.equal(state.mode, '')
 })
 
 test('an aborted turn keeps the previous prediction', async () => {
@@ -374,6 +383,65 @@ test('fork mode sends the parent transcript and the synthetic turn', async () =>
 
   state = definition.apply(state, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
   assert.equal(state.text, '继续修复测试')
+  assert.equal(state.mode, 'fork')
+})
+
+test('fork mode falls back to the digest when the fork yields no text', async () => {
+  const conversation = [
+    { role: 'system', content: [{ type: 'text', text: 'SYSTEM' }] },
+    { role: 'user', content: [{ type: 'text', text: 'Fix the test' }] },
+    { role: 'assistant', content: [{ type: 'text', text: 'The test passes.' }] },
+  ]
+  const events = [
+    { type: 'user/message', data: { content: [{ type: 'text', text: 'Fix the test' }] } },
+    { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'The test passes.' }] } } },
+    { type: 'turn/start', data: { turn: 1 } },
+  ]
+  const session = {
+    id: 'session-5',
+    header: {},
+    deriveMessages: () => conversation,
+    ownEvents: () => events,
+    requestHeader: () => ({ config: { provider: 'p', model: 'm' } }),
+  }
+  const listeners = {}
+  let calls = 0
+  let definition
+  const scoped = {
+    sessionProjections: { register(value) { definition = value; return () => {} } },
+    on(name, listener) {
+      listeners[name] = listener
+      return () => {}
+    },
+    get() {
+      return undefined
+    },
+    llm: {
+      async prepareCall(config) {
+        return {
+          config,
+          stream: async function* () {
+            calls += 1
+            if (calls === 1) {
+              yield { type: 'finish', reason: { kind: 'stop' } }
+              return
+            }
+            yield { type: 'text-delta', index: 0, text: '继续修复测试' }
+            yield { type: 'finish', reason: { kind: 'stop' } }
+          },
+        }
+      },
+    },
+    logger: { warn() {} },
+  }
+  apply({ inject: (_names, callback) => callback(scoped) }, { mode: 'fork', timeoutMs: 1000, fallback: true })
+  let state = definition.init({ id: 'session-5' })
+  await listeners['agent/turn-stopping']({ agent: { session }, turn: 1 })
+  assert.equal(calls, 2)
+
+  state = definition.apply(state, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+  assert.equal(state.text, '继续修复测试')
+  assert.equal(state.mode, 'digest')
 })
 
 test('package.json declares the minimum supported dsh runtime', async () => {

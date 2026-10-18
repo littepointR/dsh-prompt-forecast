@@ -51,11 +51,12 @@ prompt。适合追求低成本或会话很长、发送完整 transcript 太贵�
 |---|---|---|
 | `enabled` | `true` | `false` 时不注册 Host 半 |
 | `mode` | `fork` | `fork` = 完整 transcript + `Suggest my next message.`；`digest` = 精简 JSON 摘要 |
-| `maxTokens` | `256` | 预测请求的输出预算 |
+| `maxTokens` | `512` | 预测请求的输出预算 |
 | `temperature` | `0.4` | 采样温度 |
-| `timeoutMs` | `4000` | 请求硬超时；更慢的答案会被丢弃 |
+| `timeoutMs` | `8000` | 请求硬超时；更慢的答案会被丢弃 |
 | `maxPromptChars` | `80` | 预测文本的裁剪长度 |
-| `maxForkChars` | `32000` | fork 模式对话窗口的字符预算（system / developer 文本始终保留） |
+| `maxForkChars` | `12000` | fork 模式对话窗口的字符预算（system / developer 文本始终保留） |
+| `fallback` | `true` | fork 没有产出时，用精简 digest 再试一次 |
 | `maxInputChars` | `6000` | digest 模式摘要大小上限 |
 | `skipSubagents` | `true` | 子代理会话不预测 |
 | `provider` | 本轮路由 | 显式指定 provider |
@@ -80,7 +81,7 @@ dsh web
 固定到已打标签的版本：
 
 ```bash
-dsh plugin --profile web add github:littepointR/dsh-prompt-forecast#v0.2.0
+dsh plugin --profile web add github:littepointR/dsh-prompt-forecast#v0.2.1
 ```
 
 Desktop 应用的 `desktop` profile 由 Electron 独占，CLI 会拒绝
