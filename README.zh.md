@@ -32,7 +32,31 @@ DeepSeek Harness Web 输入框里的「下一句提示词」幽灵预测，交�
 
 ## 安装
 
-在 Plugin Manager 中把本目录作为 bundle 安装。bundle patch 会插入 `prompt-forecast` 行；作为普通 profile bundle，它会在重启后保留。
+### 从 GitHub 安装（无需构建）
+
+```bash
+dsh plugin --profile web add github:littepointR/dsh-prompt-forecast
+dsh web
+```
+
+`dsh plugin add` 会把参数转发给目标 profile 里的 pnpm，安装包，并因为包声明了
+`dsh.bundle.patch` 而自动把它加入 `dsh.profile.bundles`。安装后需要重启 profile
+才会加载插件。本包是纯 JavaScript、没有 `prepare` 构建脚本，所以 git 安装不需要
+额外的 pnpm 构建授权。
+
+固定到已打标签的版本：
+
+```bash
+dsh plugin --profile web add github:littepointR/dsh-prompt-forecast#v0.1.0
+```
+
+Desktop 应用的 `desktop` profile 由 Electron 独占，CLI 会拒绝
+`--profile desktop`。在 Desktop 里请使用 设置 → 插件 安装，或安装到 CLI profile。
+
+### 从本地目录安装
+
+在 Plugin Manager 中把本目录作为 bundle 安装。bundle patch 会插入
+`prompt-forecast` 行；作为普通 profile bundle，它会在重启后保留。
 
 ## 限制
 

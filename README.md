@@ -45,6 +45,31 @@ within that budget is dropped and the turn finishes without one.
 
 ## Install
 
+### From GitHub (no build step)
+
+```bash
+dsh plugin --profile web add github:littepointR/dsh-prompt-forecast
+dsh web
+```
+
+`dsh plugin add` forwards to pnpm in the chosen profile, installs the package,
+and automatically adds the bundle to `dsh.profile.bundles` because the package
+declares `dsh.bundle.patch`. Restart the profile for the plugin to load. The
+package is plain JavaScript with no `prepare` build script, so a git install
+needs no extra pnpm build approval.
+
+To pin the tagged release:
+
+```bash
+dsh plugin --profile web add github:littepointR/dsh-prompt-forecast#v0.1.0
+```
+
+The Desktop application's `desktop` profile is reserved for the Electron app, so
+the CLI rejects `--profile desktop`. Use Settings → Plugins there, or install
+into a CLI profile.
+
+### From a local checkout
+
 Use Plugin Manager with this package directory as the bundle target. The bundle
 patch inserts the `prompt-forecast` row; it survives restarts because it is a
 normal profile bundle.
