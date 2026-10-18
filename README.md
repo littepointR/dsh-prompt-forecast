@@ -90,9 +90,9 @@ The row's `config` block in `cordis.patch.yml` overrides every default:
 |---|---|---|
 | `enabled` | `true` | `false` leaves the Host half unregistered |
 | `mode` | `fork` | `fork` = full transcript + `Suggest my next message.`; `digest` = compact JSON excerpt |
-| `maxTokens` | `512` | Output budget of the prediction request |
+| `maxTokens` | `1024` | Output budget of the prediction request |
 | `temperature` | `0.4` | Sampling temperature |
-| `timeoutMs` | `8000` | Hard bound on the request; a slower answer is dropped |
+| `timeoutMs` | `12000` | Hard bound on the request; a slower answer is dropped |
 | `maxPromptChars` | `80` | Clip length of the predicted prompt |
 | `maxForkChars` | `12000` | Character budget of the forked conversation window (system/developer text is always kept) |
 | `fallback` | `true` | When the fork yields no text, retry with the compact digest |
@@ -124,7 +124,7 @@ needs no extra pnpm build approval.
 To pin the tagged release:
 
 ```bash
-dsh plugin --profile web add github:littepointR/dsh-prompt-forecast#v0.2.3
+dsh plugin --profile web add github:littepointR/dsh-prompt-forecast#v0.2.4
 ```
 
 The Desktop application's `desktop` profile is reserved for the Electron app, so

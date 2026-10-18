@@ -55,9 +55,9 @@ test('resolveConfig supplies every default', () => {
   const config = resolveConfig(undefined)
   assert.equal(config.enabled, true)
   assert.equal(config.mode, 'fork')
-  assert.equal(config.maxTokens, 512)
+  assert.equal(config.maxTokens, 1024)
   assert.equal(config.temperature, 0.4)
-  assert.equal(config.timeoutMs, 8000)
+  assert.equal(config.timeoutMs, 12000)
   assert.equal(config.maxPromptChars, 80)
   assert.equal(config.maxInputChars, 6000)
   assert.equal(config.maxForkChars, 12000)
@@ -81,9 +81,9 @@ test('resolveConfig rejects wrong types instead of propagating them', () => {
   })
   assert.equal(config.enabled, true)
   assert.equal(config.mode, 'fork')
-  assert.equal(config.maxTokens, 512)
+  assert.equal(config.maxTokens, 1024)
   assert.equal(config.temperature, 0.4)
-  assert.equal(config.timeoutMs, 8000)
+  assert.equal(config.timeoutMs, 12000)
   assert.equal(config.maxForkChars, 12000)
   assert.equal(config.fallback, true)
   assert.equal(config.provider, undefined)
@@ -242,7 +242,7 @@ test('one completed turn publishes the prediction and the next turn without one 
           ? config
           : configure({ ...config }, { reasoning: { efforts: [{ id: 'low' }, { id: 'high' }] } })
         assert.equal(controls.reasoningEffort, 'low')
-        assert.equal(controls.maxTokens, 512)
+        assert.equal(controls.maxTokens, 1024)
         return {
           config: controls,
           stream: async function* (options) {
@@ -480,6 +480,49 @@ test('fork mode falls back to the digest when the fork yields no text', async ()
   state = definition.apply(state, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
   assert.equal(state.text, '继续修复测试')
   assert.equal(state.mode, 'digest')
+})
+
+test('a failed prediction records the fork and digest failure reasons', async () => {
+  const conversation = [
+    { role: 'system', content: [{ type: 'text', text: 'SYSTEM' }] },
+    { role: 'user', content: [{ type: 'text', text: 'Fix the test' }] },
+    { role: 'assistant', content: [{ type: 'text', text: 'The test passes.' }] },
+  ]
+  const events = [
+    { type: 'user/message', data: { content: [{ type: 'text', text: 'Fix the test' }] } },
+    { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'The test passes.' }] } } },
+    { type: 'turn/start', data: { turn: 1 } },
+  ]
+  const session = {
+    id: 'session-6',
+    header: {},
+    deriveMessages: () => conversation,
+    ownEvents: () => events,
+    requestHeader: () => ({ config: { provider: 'p', model: 'm' } }),
+  }
+  const listeners = {}
+  let definition
+  const scoped = {
+    sessionProjections: { register(value) { definition = value; return () => {} } },
+    llm: {
+      async prepareCall(config) {
+        return {
+          config,
+          stream: async function* () {
+            yield { type: 'finish', reason: { kind: 'stop' } }
+          },
+        }
+      },
+    },
+    logger: { warn() {} },
+  }
+  apply(rootContext(scoped, listeners), { mode: 'fork', timeoutMs: 1000, fallback: true })
+  let state = definition.init({ id: 'session-6' })
+  await listeners['agent/turn-stopping']({ agent: { session }, turn: 1 })
+  state = definition.apply(state, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+  assert.equal(state.text, '')
+  assert.equal(state.mode, '')
+  assert.equal(state.reason, 'fork:empty;digest:empty')
 })
 
 test('package.json declares the minimum supported dsh runtime', async () => {

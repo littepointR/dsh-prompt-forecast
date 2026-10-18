@@ -34,9 +34,9 @@ function knownPrediction(sessionId) {
 const DEFAULT_CONFIG = {
   enabled: true,
   mode: 'fork',
-  maxTokens: 512,
+  maxTokens: 1024,
   temperature: 0.4,
-  timeoutMs: 8_000,
+  timeoutMs: 12_000,
   maxPromptChars: 80,
   maxInputChars: 6_000,
   maxForkChars: 12_000,
@@ -372,13 +372,16 @@ function resolveRoute(ctx, session, config) {
 
 /**
  * One bounded auxiliary model call shared by both prediction modes.
- * @returns normalized prompt text, or `undefined` when the call failed,
- * timed out, was aborted, or produced nothing usable.
+ * @returns `{ text }` on success, or `{ failure, detail? }` naming why not.
  */
 async function generateText(ctx, session, request, route, config, signal) {
   const controller = new AbortController()
   const abort = () => controller.abort()
-  const timer = setTimeout(abort, config.timeoutMs)
+  let timedOut = false
+  const timer = setTimeout(() => {
+    timedOut = true
+    abort()
+  }, config.timeoutMs)
   if (signal !== undefined) {
     if (signal.aborted) abort()
     else signal.addEventListener('abort', abort, { once: true })
@@ -407,18 +410,28 @@ async function generateText(ctx, session, request, route, config, signal) {
       signal: controller.signal,
     })
     let text = ''
+    let finishKind = 'stop'
     for await (const chunk of stream) {
       if (chunk?.type === 'text-delta' && typeof chunk.text === 'string') text += chunk.text
-      else if (chunk?.type === 'finish') {
-        const kind = chunk.reason?.kind
-        if (kind === 'error' || kind === 'aborted') return undefined
-      }
+      else if (chunk?.type === 'finish') finishKind = chunk.reason?.kind ?? 'stop'
     }
+    if (finishKind === 'error') return { failure: 'provider' }
+    if (finishKind === 'aborted') return { failure: timedOut ? 'timeout' : 'aborted' }
     const suggestion = normalizePrediction(text, config.maxPromptChars)
-    if (suggestion === undefined || !isActionablePrediction(suggestion)) return undefined
-    return suggestion
-  } catch {
-    return undefined
+    if (suggestion === undefined) {
+      if (/^none[.!]?$/iu.test(text.trim())) return { failure: 'none' }
+      if (text.trim() === '') {
+        return { failure: finishKind === 'max-tokens' ? 'max-tokens' : finishKind === 'tool-calls' ? 'tool-calls' : 'empty' }
+      }
+      return { failure: 'unusable' }
+    }
+    if (!isActionablePrediction(suggestion)) return { failure: 'filtered', detail: suggestion.slice(0, 160) }
+    return { text: suggestion }
+  } catch (error) {
+    return {
+      failure: timedOut ? 'timeout' : 'error',
+      detail: String(error?.message ?? error).slice(0, 200),
+    }
   } finally {
     clearTimeout(timer)
     if (signal !== undefined) signal.removeEventListener('abort', abort)
@@ -436,51 +449,62 @@ async function generateDigestPrediction(ctx, session, input, route, config, sign
 /** The Codex-style mode: the parent transcript plus one synthetic user turn. */
 async function generateForkPrediction(ctx, session, route, config, signal) {
   const context = buildForkContext(session, config)
-  if (context === undefined) return undefined
+  if (context === undefined) return { failure: 'no-context' }
   const system = context.system === undefined ? ACTION_RULES : `${context.system}\n\n${ACTION_RULES}`
   return generateText(ctx, session, { system, messages: context.messages }, route, config, signal)
 }
 
 /**
  * Produce one prediction for an already closing turn.
- * @returns `{ text, model }` on success, or `undefined` when it is unavailable.
+ * @returns `{ text, model, mode }` on success, or `{ failure, detail? }` naming
+ * why the predictor produced nothing.
  */
 async function predictionForTurn(scoped, session, turn, config, signal) {
   const route = resolveRoute(scoped, session, config)
-  if (route === undefined) return undefined
-  let text
-  let mode = 'digest'
+  if (route === undefined) return { failure: 'no-route' }
+
+  const finish = (produced, mode) => {
+    const { users } = recentDialogue(session, 1, 0)
+    if (users.length > 0 && normalizePrediction(users[users.length - 1], Number.MAX_SAFE_INTEGER) === produced.text) {
+      return { failure: 'echo' }
+    }
+    return { text: produced.text, model: route.model, mode }
+  }
+  const combine = (fork, digest) => ({
+    failure: `fork:${fork.failure};digest:${digest.failure}`,
+    detail: [fork.detail, digest.detail].filter(Boolean).join(' | ').slice(0, 240),
+  })
+
   if (config.mode === 'fork') {
-    mode = 'fork'
-    text = await generateForkPrediction(scoped, session, route, config, signal)
-    if (text === undefined && config.fallback) {
+    const fork = await generateForkPrediction(scoped, session, route, config, signal)
+    if (fork.text !== undefined) return finish(fork, 'fork')
+    if (config.fallback) {
       // The full-transcript fork is the quality path; the compact digest is the
       // cheap safety net when the fork times out, returns no text, or the route
       // rejects the larger request.
       const input = buildPredictionInput(session, turn, config)
-      if (input !== undefined) {
-        text = await generateDigestPrediction(
-          scoped,
-          session,
-          input,
-          route,
-          { ...config, timeoutMs: Math.min(config.timeoutMs, 4_000) },
-          signal,
-        )
-        if (text !== undefined) mode = 'digest'
+      if (input === undefined) {
+        return { failure: `fork:${fork.failure};digest:no-context`, detail: fork.detail }
       }
+      const digest = await generateDigestPrediction(
+        scoped,
+        session,
+        input,
+        route,
+        { ...config, timeoutMs: Math.min(config.timeoutMs, 8_000) },
+        signal,
+      )
+      if (digest.text !== undefined) return finish(digest, 'digest')
+      return combine(fork, digest)
     }
-  } else {
-    const input = buildPredictionInput(session, turn, config)
-    if (input === undefined) return undefined
-    text = await generateDigestPrediction(scoped, session, input, route, config, signal)
+    return { failure: `fork:${fork.failure}`, detail: fork.detail }
   }
-  if (text === undefined) return undefined
-  const { users } = recentDialogue(session, 1, 0)
-  if (users.length > 0 && normalizePrediction(users[users.length - 1], Number.MAX_SAFE_INTEGER) === text) {
-    return undefined
-  }
-  return { text, model: route.model, mode }
+
+  const input = buildPredictionInput(session, turn, config)
+  if (input === undefined) return { failure: 'digest:no-context' }
+  const digest = await generateDigestPrediction(scoped, session, input, route, config, signal)
+  if (digest.text !== undefined) return finish(digest, 'digest')
+  return { failure: `digest:${digest.failure}`, detail: digest.detail }
 }
 
 /**
@@ -504,7 +528,7 @@ export function apply(ctx, rawConfig) {
       init: (header) => {
         const known = knownPrediction(header.id)
         return known === undefined
-          ? { session: String(header.id), turn: 0, text: '', model: '', at: 0, mode: '', reason: '' }
+          ? { session: String(header.id), turn: 0, text: '', model: '', at: 0, mode: '', reason: '', detail: '' }
           : { session: String(header.id), ...known }
       },
       apply: (state, event) => {
@@ -523,6 +547,7 @@ export function apply(ctx, rawConfig) {
             at: entry.at,
             mode: entry.mode,
             reason: entry.reason ?? '',
+            detail: entry.detail ?? '',
           }
         }
         // A completed turn with no prediction clears the previous hint; an
@@ -530,7 +555,7 @@ export function apply(ctx, rawConfig) {
         // predict from.
         if (event.data?.reason?.kind !== 'completed') return state
         if (state.text === '' && state.reason === '' && state.turn === turn) return state
-        return { ...state, turn, text: '', model: '', at: 0, mode: '', reason: '' }
+        return { ...state, turn, text: '', model: '', at: 0, mode: '', reason: '', detail: '' }
       },
       wire: {
         viewSchema: JSON_SCHEMA,
@@ -542,6 +567,7 @@ export function apply(ctx, rawConfig) {
             at: state.at,
             mode: state.mode,
             reason: state.reason,
+            detail: state.detail,
           })
           return {
             turn: state.turn,
@@ -550,6 +576,7 @@ export function apply(ctx, rawConfig) {
             at: state.at,
             mode: state.mode,
             reason: state.reason,
+            detail: state.detail,
           }
         },
       },
@@ -584,15 +611,22 @@ export function apply(ctx, rawConfig) {
         return
       }
       const result = await predictionForTurn(ctx, session, turn, config, payload.signal)
-      if (result === undefined) {
+      if (result.text === undefined) {
         // Record the attempt so the projection checkpoint shows that the hook
-        // fired and the predictor (not the wiring) produced nothing.
-        byTurn.set(turn, { text: '', model: '', mode: '', reason: 'no-prediction', at: Date.now() })
+        // fired and why the predictor produced nothing.
+        byTurn.set(turn, {
+          text: '',
+          model: '',
+          mode: '',
+          reason: result.failure ?? 'no-prediction',
+          detail: result.detail ?? '',
+          at: Date.now(),
+        })
         return
       }
       // The session is live by construction here: `turn-stopping` is emitted
       // by its running Agent. `session/disposed` cleans any late entry.
-      byTurn.set(turn, { text: result.text, model: result.model, mode: result.mode, reason: '', at: Date.now() })
+      byTurn.set(turn, { text: result.text, model: result.model, mode: result.mode, reason: '', detail: '', at: Date.now() })
     } catch (error) {
       // A failing prediction must never fail the turn it follows.
       ctx.logger?.warn?.('prompt-forecast: prediction failed: %o', error)

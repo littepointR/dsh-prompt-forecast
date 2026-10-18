@@ -65,9 +65,9 @@ system prompt。适合追求低成本或会话很长、发送完整 transcript �
 |---|---|---|
 | `enabled` | `true` | `false` 时不注册 Host 半 |
 | `mode` | `fork` | `fork` = 完整 transcript + `Suggest my next message.`；`digest` = 精简 JSON 摘要 |
-| `maxTokens` | `512` | 预测请求的输出预算 |
+| `maxTokens` | `1024` | 预测请求的输出预算 |
 | `temperature` | `0.4` | 采样温度 |
-| `timeoutMs` | `8000` | 请求硬超时；更慢的答案会被丢弃 |
+| `timeoutMs` | `12000` | 请求硬超时；更慢的答案会被丢弃 |
 | `maxPromptChars` | `80` | 预测文本的裁剪长度 |
 | `maxForkChars` | `12000` | fork 模式对话窗口的字符预算（system / developer 文本始终保留） |
 | `fallback` | `true` | fork 没有产出时，用精简 digest 再试一次 |
@@ -95,7 +95,7 @@ dsh web
 固定到已打标签的版本：
 
 ```bash
-dsh plugin --profile web add github:littepointR/dsh-prompt-forecast#v0.2.3
+dsh plugin --profile web add github:littepointR/dsh-prompt-forecast#v0.2.4
 ```
 
 Desktop 应用的 `desktop` profile 由 Electron 独占，CLI 会拒绝
