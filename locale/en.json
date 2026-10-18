@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Prompt Forecast",
+    "description": "Predicts your next prompt from the conversation while the composer is empty; press Tab to use it."
+  }
+}
