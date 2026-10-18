@@ -1,9 +1,9 @@
 {
   "name": "@local/dsh-prompt-forecast",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": true,
   "type": "module",
-  "description": "Ghost-text next-prompt prediction in the DeepSeek Harness Web composer, accepted with Tab.",
+  "description": "Ghost-text next-action prediction in the DeepSeek Harness Web composer, accepted with Tab or Right Arrow.",
   "license": "MIT",
   "author": "littepoint",
   "homepage": "https://github.com/littepointR/dsh-prompt-forecast#readme",

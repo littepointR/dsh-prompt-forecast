@@ -30,15 +30,15 @@ window.__ModuleLoader__.load({
 
     /** Simplified Chinese dictionary (the key-set source of truth). */
     const zh = {
-      accept: 'Tab',
-      hint: '按 Tab 采用这条预测',
+      accept: 'Tab / →',
+      hint: '按 Tab 或 → 采用这条预测',
       label: '提示词预测',
     }
 
     /** English dictionary, checked complete against the zh key set. */
     const en = {
-      accept: 'Tab',
-      hint: 'Press Tab to use this prediction',
+      accept: 'Tab / →',
+      hint: 'Press Tab or → to use this prediction',
       label: 'Prompt prediction',
     }
 
@@ -129,6 +129,11 @@ window.__ModuleLoader__.load({
           if (event.altKey || event.ctrlKey || event.metaKey) return
           if (!composerHasFocus()) return
           if (event.key === 'Tab' && event.shiftKey === false) {
+            event.preventDefault()
+            if (accept(state.actions, state.suggestion)) setDismissed(state.suggestion)
+            return
+          }
+          if ((event.key === 'ArrowRight' || event.key === 'Right') && event.shiftKey === false) {
             event.preventDefault()
             if (accept(state.actions, state.suggestion)) setDismissed(state.suggestion)
             return

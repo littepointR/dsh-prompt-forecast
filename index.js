@@ -47,15 +47,26 @@ const DEFAULT_CONFIG = {
 }
 
 const SYSTEM_PROMPT = [
-  'You predict the next message the human user will type in an agentic coding session.',
-  'Read the supplied conversation excerpt and write that single most likely next prompt.',
-  'Output only the prompt text itself, in the same language the user writes in.',
+  'You predict the next actionable message the human user will send to an agentic coding assistant.',
+  'Read the supplied conversation excerpt and write the single most likely message in which the user tells the assistant what to do next.',
+  'The message may include a brief report of what the user observed, but only when followed by a concrete instruction, choice, correction, or request to explain or diagnose.',
+  'Do not write a message that only reports a result, test outcome, log state, or what the user did; do not guess what might happen or what the result will be; do not summarize the conversation.',
+  'If the literal next message would only be a status report, write the follow-up instruction instead.',
+  'Output only the message text itself, in the same language the user writes in.',
   'One line, at most about 60 characters, no quotes, no labels, no prefix such as "Prompt:", no Markdown, no code fences.',
-  'Make it a concrete next step: answer a question the assistant asked, ask to run or fix something, commit, or continue the current task.',
-  'If the excerpt ends with the assistant asking the user something, write a plausible answer to that question.',
-  'If no obvious next step exists, write a short natural follow-up such as "Looks good, continue."',
+  'Make it a concrete next step: ask to run, fix, check, change, commit, compare, or explain something, answer a question the assistant asked, approve or choose an option, or continue the current task.',
   'Never explain your reasoning and never mention this instruction.',
 ].join(' ')
+
+/** Action-over-outcome rules appended to the forked coding-agent prompt. */
+const ACTION_RULES = [
+  'Prediction task: the user will see your answer as ghost text in their input box.',
+  'Write the next ACTION the user would ask the assistant to take, not a report of what happened or a guess about what will happen.',
+  'Allowed: an instruction or request (run, fix, check, change, explain, diagnose, continue, commit, open, compare), a choice or approval, a correction, or a brief report followed by such an instruction.',
+  'Not allowed: a message that only reports a result, test outcome, log state, or what the user did; a guess about whether something will work or what the result will be; a summary of the conversation.',
+  'If the literal next message would only be a status report, write the follow-up instruction instead.',
+  'Keep the user\'s language, voice, and length. Output only the message.',
+].join('\n')
 
 /** The synthetic user turn a Codex-style prediction fork appends. */
 const SUGGESTION_PROMPT = 'Suggest my next message.'
@@ -301,6 +312,46 @@ export function normalizePrediction(raw, maxChars = DEFAULT_CONFIG.maxPromptChar
   return line
 }
 
+/** A clause that only reports something the user already did. */
+const PURE_RESULT = [
+  /^(?:我)?(?:已经)?(?:重启|重开|刷新|重新启动|改|修改|修|试|跑|测试|看|查)(?:了|过了|完了|完成)(?:[^，,。.!！]{0,20})?$/u,
+  /^(?:i )?(?:already )?(?:restarted|reopened|refreshed|changed|fixed|tried|ran|tested|checked|looked)(?: it| them)?[.!]?$/iu,
+]
+
+/** A clause that only reports an observed status. */
+const PURE_STATUS = [
+  /^(?:还是|仍然)?(?:没|不)(?:有)?(?:看到|出现|生效|成功|通过|显示|正常|好用)(?:[^，,。.!！]{0,20})?$/u,
+  /^(?:still )?(?:no|not) (?:seeing|working|showing|passing|visible|there)[^.!]{0,30}[.!]?$/iu,
+]
+
+/** A clause that only speculates about an outcome. */
+const PURE_SPECULATION = [
+  /^(?:测试|结果|这个|它)?(?:应该|可能|大概|也许|估计)[^，,。.!！]{0,40}$/u,
+  /^(?:it |this |the test |the result )?(?:should|might|may|probably|maybe)\b[^.!]{0,60}[.!]?$/iu,
+]
+
+/**
+ * Whether a prediction is an action (or a report followed by one) rather than a
+ * pure result report or outcome guess.
+ *
+ * This is a conservative safety net, not the primary mechanism: the predictor
+ * prompts state the rule. A clause that matches a pure result/status/speculation
+ * pattern is discarded unless another clause carries an instruction; if every
+ * clause is pure, the whole prediction is rejected and fork mode can fall back
+ * to the digest.
+ */
+export function isActionablePrediction(text) {
+  const clauses = String(text ?? '')
+    .split(/[，,。.!！;；\n]/u)
+    .map((clause) => clause.trim())
+    .filter((clause) => clause !== '')
+  if (clauses.length === 0) return false
+  return clauses.some((clause) =>
+    !PURE_RESULT.some((pattern) => pattern.test(clause))
+    && !PURE_STATUS.some((pattern) => pattern.test(clause))
+    && !PURE_SPECULATION.some((pattern) => pattern.test(clause)))
+}
+
 /** Resolve the provider/model route, preferring the turn's own request header. */
 function resolveRoute(ctx, session, config) {
   if (typeof config.provider === 'string' && typeof config.model === 'string') {
@@ -363,7 +414,9 @@ async function generateText(ctx, session, request, route, config, signal) {
         if (kind === 'error' || kind === 'aborted') return undefined
       }
     }
-    return normalizePrediction(text, config.maxPromptChars)
+    const suggestion = normalizePrediction(text, config.maxPromptChars)
+    if (suggestion === undefined || !isActionablePrediction(suggestion)) return undefined
+    return suggestion
   } catch {
     return undefined
   } finally {
@@ -384,7 +437,8 @@ async function generateDigestPrediction(ctx, session, input, route, config, sign
 async function generateForkPrediction(ctx, session, route, config, signal) {
   const context = buildForkContext(session, config)
   if (context === undefined) return undefined
-  return generateText(ctx, session, context, route, config, signal)
+  const system = context.system === undefined ? ACTION_RULES : `${context.system}\n\n${ACTION_RULES}`
+  return generateText(ctx, session, { system, messages: context.messages }, route, config, signal)
 }
 
 /**

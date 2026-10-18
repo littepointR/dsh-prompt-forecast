@@ -5,6 +5,7 @@ import {
   apply,
   buildForkContext,
   buildPredictionInput,
+  isActionablePrediction,
   normalizePrediction,
   recentDialogue,
   resolveConfig,
@@ -117,6 +118,19 @@ test('normalizePrediction returns undefined for empty output', () => {
   assert.equal(normalizePrediction('""'), undefined)
 })
 
+test('isActionablePrediction separates actions from pure reports and guesses', () => {
+  assert.equal(isActionablePrediction('重启了，还是没看到预测'), false)
+  assert.equal(isActionablePrediction('测试应该会过'), false)
+  assert.equal(isActionablePrediction('可能会报错'), false)
+  assert.equal(isActionablePrediction('我已经重启了应用'), false)
+  assert.equal(isActionablePrediction('查一下 projection 缓存'), true)
+  assert.equal(isActionablePrediction('重启了，还是没看到，查一下日志'), true)
+  assert.equal(isActionablePrediction('用方案 A'), true)
+  assert.equal(isActionablePrediction('为什么会 fork 超时？'), true)
+  assert.equal(isActionablePrediction('好的'), true)
+  assert.equal(isActionablePrediction('Run the tests.'), true)
+})
+
 test('recentDialogue returns the newest human inputs and replies in order', () => {
   const session = fakeSession([
     userEvent('first'),
@@ -186,6 +200,7 @@ test('one completed turn publishes the prediction and the next turn without one 
   }
   const listeners = {}
   let definition
+  let captured
   const scoped = {
     sessionProjections: {
       register(value) {
@@ -210,7 +225,8 @@ test('one completed turn publishes the prediction and the next turn without one 
         assert.equal(controls.maxTokens, 512)
         return {
           config: controls,
-          stream: async function* () {
+          stream: async function* (options) {
+            captured = options
             yield { type: 'text-delta', index: 0, text: '"Run the tests."' }
             yield { type: 'finish', reason: { kind: 'stop' } }
           },
@@ -225,6 +241,7 @@ test('one completed turn publishes the prediction and the next turn without one 
   let state = definition.init({ id: 'session-2' })
   await listeners['agent/turn-stopping']({ agent: { session }, turn: 1 })
 
+  assert.ok(captured.system.includes('next actionable message'))
   state = definition.apply(state, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
   assert.equal(state.turn, 1)
   assert.equal(state.text, 'Run the tests.')
@@ -377,7 +394,8 @@ test('fork mode sends the parent transcript and the synthetic turn', async () =>
   await listeners['agent/turn-stopping']({ agent: { session }, turn: 1 })
 
   assert.ok(captured !== undefined)
-  assert.equal(captured.system, 'SYSTEM\n\nDEVELOPER')
+  assert.ok(captured.system.startsWith('SYSTEM\n\nDEVELOPER'))
+  assert.ok(captured.system.includes('next ACTION'))
   assert.equal(captured.messages.at(-1).content[0].text, 'Suggest my next message.')
   assert.equal(captured.messages.some(message => message.role === 'tool'), false)
 

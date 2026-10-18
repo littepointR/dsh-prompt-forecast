@@ -1,10 +1,10 @@
 # Prompt Forecast
 
-DeepSeek Harness Web 输入框里的「下一句提示词」幽灵预测，交互方式参考 Codex / Claude Code 的 prompt suggestions。
+DeepSeek Harness Web 输入框里的「下一步动作」幽灵预测，交互方式参考 Codex / Claude Code 的 prompt suggestions。
 
-每轮对话完成后，Host 半会让当前会话使用的模型预测用户最可能输入的下一条消息，通过客户端可见的 session projection 发布；Client 半在输入框为空时把这句话以灰色文字显示在第一行。按 **Tab** 写入草稿，按 **Esc** 忽略；开始输入后自动消失，已输入的内容不会被替换。
+每轮对话完成后，Host 半会让当前会话使用的模型预测用户接下来最可能发送的**可执行消息**，通过客户端可见的 session projection 发布；Client 半在输入框为空时把这句话以灰色文字显示在第一行。按 **Tab** 或 **→** 写入草稿，按 **Esc** 忽略；开始输入后自动消失，已输入的内容不会被替换。
 
-默认模式是 Codex 风格的上下文 fork：父会话当前的文本 transcript，加一条合成的 user 消息 `Suggest my next message.`。
+默认模式是 Codex 风格的上下文 fork：父会话当前的文本 transcript，加一条合成的 user 消息 `Suggest my next message.`，并附加一段“只写动作、不写结果汇报/猜测”的规则。
 
 ## 依赖要求
 
@@ -20,10 +20,23 @@ DeepSeek Harness Web 输入框里的「下一句提示词」幽灵预测，交�
 ## 行为
 
 - 默认 fork 模式基于完整文本 transcript 预测；digest 模式使用精简 JSON 摘要。
+- 预测的是下一步动作，不是结果汇报或结果猜测。
 - 使用用户当前书写的语言，输出一行短句。
 - 使用刚服务完本轮请求的模型路由（找不到时回退到配置默认模型），无需额外配置 provider。
 - 跳过子代理会话和没有人类输入的轮次。
 - 静默失败：预测超时、被取消或请求失败都不会在对话里报错。
+
+## 预测什么
+
+目标是下一条**可执行消息**，而不是对对话的字面续写。有用的建议是用户接下来会发给助手、告诉它做什么的消息：
+
+- 指令：跑一下测试、修这个错误、查 projection 缓存、解释一下失败原因
+- 选择/批准：用方案 A、可以，继续、就这样
+- 纠正：不对，应该改 client 那一侧
+- 要求解释或诊断：fork 为什么会超时？
+- 简短汇报 + 指令：重启了还是不行，查一下日志
+
+纯结果汇报、测试结果、日志状态、叙述性总结、对可能发生什么的猜测都会被拒绝；`NONE` 是合法输出。另有一层保守的后置过滤，丢弃明显的纯汇报分句；fork 结果不可用时自动回退到 digest。
 
 ## 预测模式
 
@@ -36,12 +49,13 @@ Suggest my next message.
 ```
 
 模型回复就是幽灵文本。这里不会创建子会话或 session 事件；fork 只是一次辅助调用的
-内存消息列表。因为发送完整 transcript，这个模式的 token 成本更高，`timeoutMs`
-也需要比 digest 模式更大。
+内存消息列表。system prompt 末尾会附加一段动作规则，要求模型写用户的下一步指令，
+而不是状态汇报或结果猜测。因为发送完整 transcript，这个模式的 token 成本更高，
+`timeoutMs` 也需要比 digest 模式更大。
 
 `mode: 'digest'` 保留此前的轻量路径：把 `recent_user_messages`、
-`latest_assistant_reply`、`tools_used` 打包成 JSON 摘要，配一段专门的短 system
-prompt。适合追求低成本或会话很长、发送完整 transcript 太贵的场景。
+`latest_assistant_reply`、`tools_used` 打包成 JSON 摘要，配一段动作导向的短
+system prompt。适合追求低成本或会话很长、发送完整 transcript 太贵的场景。
 
 ## 配置
 
@@ -81,7 +95,7 @@ dsh web
 固定到已打标签的版本：
 
 ```bash
-dsh plugin --profile web add github:littepointR/dsh-prompt-forecast#v0.2.1
+dsh plugin --profile web add github:littepointR/dsh-prompt-forecast#v0.2.2
 ```
 
 Desktop 应用的 `desktop` profile 由 Electron 独占，CLI 会拒绝
@@ -95,7 +109,7 @@ Desktop 应用的 `desktop` profile 由 Electron 独占，CLI 会拒绝
 ## 限制
 
 - 只在输入框为空时显示建议。补全已经输入一半的草稿需要 slot 尚未暴露的光标几何信息，不在当前版本范围内。
-- 建议只是提示，不是动作：按 Tab 只把纯文本插入草稿，不会发送。
+- 建议只是提示，不是动作：按 Tab 或 → 只把纯文本插入草稿，不会发送。
 - 预测质量取决于会话模型；过小的模型可能给出泛泛的追问。
 
 ## 开发
@@ -106,7 +120,7 @@ node --check index.js && node --check client.js
 ```
 
 - `index.js` — Host 半：`agent/turn-stopping` 生成预测，`promptForecast` projection 发布。
-- `client.js` — Client 半：注册 `conversation.input.overlay`，渲染幽灵文本并处理 Tab/Esc。
+- `client.js` — Client 半：注册 `conversation.input.overlay`，渲染幽灵文本并处理 Tab/→/Esc。
 - `test/host.test.mjs` — 文本清洗、上下文摘要、projection 折叠。
 - `test/client.test.mjs` — Client 渲染分支的结构性冒烟测试（不模拟 DOM）。
 

@@ -2,17 +2,19 @@
 
 English | [中文](README.zh.md)
 
-Ghost-text prediction of your next prompt in the DeepSeek Harness Web composer,
+Ghost-text prediction of your next action in the DeepSeek Harness Web composer,
 in the style of Codex and Claude Code prompt suggestions.
 
 After a completed turn the Host half asks the session's own model for the single
-most likely next human message, publishes it through a client-visible session
-projection, and the Client half renders it as gray text on the first line of an
-empty composer. Press **Tab** to accept it into the draft, or **Esc** to ignore
-that suggestion. Typing anything hides it; the text you typed is never replaced.
+most likely next actionable message, publishes it through a client-visible
+session projection, and the Client half renders it as gray text on the first line
+of an empty composer. Press **Tab** or **→** to accept it into the draft, or
+**Esc** to ignore that suggestion. Typing anything hides it; the text you typed is
+never replaced.
 
 The default mode is a Codex-style context fork: the parent's current text
-transcript plus one synthetic user turn, `Suggest my next message.`
+transcript plus one synthetic user turn, `Suggest my next message.`, with
+explicit rules that restrict the answer to an action.
 
 ## Requirements
 
@@ -30,12 +32,32 @@ transcript plus one synthetic user turn, `Suggest my next message.`
 
 - Fork mode (default) predicts from the full text transcript; digest mode uses a
   compact JSON excerpt.
+- Predicts the next action, not a status report or an outcome guess.
 - Writes in the language the user writes in, one short line.
 - Uses the route that served the turn (falling back to the profile default
   model), so no extra provider setup is required.
 - Skips subagent sessions and turns with no human input.
 - Fails silently: a slow, aborted, or failed prediction never surfaces an error
   in the conversation.
+
+## What gets predicted
+
+The target is the next **actionable** message, not a literal continuation of the
+conversation. A useful suggestion is one the user would send to tell the
+assistant what to do next:
+
+- an instruction: run the tests, fix this error, check the projection cache,
+  explain the failure
+- a choice or approval: use option A, go ahead, keep it
+- a correction: no, change the client side
+- a request to explain or diagnose: why does the fork call time out?
+- a short report followed by an instruction: restarted, still empty — check the
+  logs
+
+Pure status reports, test results, log observations, narration, and guesses about
+what might happen are rejected; `NONE` is a valid answer. A conservative
+post-filter drops obvious pure-report clauses, and fork mode falls back to the
+digest when the result is unusable.
 
 ## Prediction modes
 
@@ -49,14 +71,16 @@ Suggest my next message.
 ```
 
 The model's reply becomes the ghost line. No child session or session event is
-created; the fork is an in-memory message list for one auxiliary call. Because
-the whole transcript is sent, this mode costs more tokens and needs a larger
-`timeoutMs` than the digest mode.
+created; the fork is an in-memory message list for one auxiliary call. A short
+action-rules block is appended to the inherited system prompt so the model writes
+the user's next instruction rather than a status report. Because the whole
+transcript is sent, this mode costs more tokens and needs a larger `timeoutMs`
+than the digest mode.
 
 `mode: 'digest'` keeps the earlier lightweight path: a compact JSON excerpt
-(`recent_user_messages`, `latest_assistant_reply`, `tools_used`) with a short
-dedicated system prompt. Use it for cheap predictions or long sessions where
-sending the transcript is too expensive.
+(`recent_user_messages`, `latest_assistant_reply`, `tools_used`) with a short,
+action-oriented system prompt. Use it for cheap predictions or long sessions
+where sending the transcript is too expensive.
 
 ## Configuration
 
@@ -100,7 +124,7 @@ needs no extra pnpm build approval.
 To pin the tagged release:
 
 ```bash
-dsh plugin --profile web add github:littepointR/dsh-prompt-forecast#v0.2.1
+dsh plugin --profile web add github:littepointR/dsh-prompt-forecast#v0.2.2
 ```
 
 The Desktop application's `desktop` profile is reserved for the Electron app, so
@@ -133,7 +157,7 @@ node --check index.js && node --check client.js
 - `index.js` — Host half: generate at `agent/turn-stopping`, publish through the
   `promptForecast` projection.
 - `client.js` — Client half: register in `conversation.input.overlay`, render the
-  ghost line, handle Tab/Esc.
+  ghost line, handle Tab/→/Esc.
 - `test/host.test.mjs` — text normalization, digest building, projection fold.
 - `test/client.test.mjs` — structural smoke test of the Client render branches
   (no DOM emulation).

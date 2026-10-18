@@ -73,7 +73,7 @@ const actions = {
 /** Props for an empty, idle composer with the given projection text. */
 function propsFor({ draft, running, subagent, text }) {
   return {
-    t: key => key,
+    t: key => ({ accept: 'Tab / →', hint: 'Press Tab or → to use this prediction' })[key] ?? key,
     inputActions: actions,
     useInput: selector => selector({ draft, attachmentIds: [], phase: 'plain' }),
     useSession: selector => selector({ running, subagent }),
@@ -90,7 +90,9 @@ test('the Client module registers into conversation.input.overlay', async () => 
 test('an idle empty composer renders the suggested prompt', () => {
   const element = render(propsFor({ draft: '', running: false, subagent: null, text: 'Run the tests.' }))
   assert.equal(element.type, 'div')
-  assert.ok(JSON.stringify(element).includes('Run the tests.'))
+  const serialized = JSON.stringify(element)
+  assert.ok(serialized.includes('Run the tests.'))
+  assert.ok(serialized.includes('Tab / →'))
 })
 
 test('a non-empty draft hides the suggestion', () => {
