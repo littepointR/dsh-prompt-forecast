@@ -504,7 +504,7 @@ export function apply(ctx, rawConfig) {
       init: (header) => {
         const known = knownPrediction(header.id)
         return known === undefined
-          ? { session: String(header.id), turn: 0, text: '', model: '', at: 0, mode: '' }
+          ? { session: String(header.id), turn: 0, text: '', model: '', at: 0, mode: '', reason: '' }
           : { session: String(header.id), ...known }
       },
       apply: (state, event) => {
@@ -515,14 +515,22 @@ export function apply(ctx, rawConfig) {
         if (entry !== undefined) {
           byTurn.delete(turn)
           if (byTurn.size === 0) pending.delete(state.session)
-          return { ...state, turn, text: entry.text, model: entry.model, at: entry.at, mode: entry.mode }
+          return {
+            ...state,
+            turn,
+            text: entry.text,
+            model: entry.model,
+            at: entry.at,
+            mode: entry.mode,
+            reason: entry.reason ?? '',
+          }
         }
         // A completed turn with no prediction clears the previous hint; an
         // aborted turn keeps it, because that turn produced no new outcome to
         // predict from.
         if (event.data?.reason?.kind !== 'completed') return state
-        if (state.text === '') return state
-        return { ...state, turn, text: '', model: '', at: 0, mode: '' }
+        if (state.text === '' && state.reason === '' && state.turn === turn) return state
+        return { ...state, turn, text: '', model: '', at: 0, mode: '', reason: '' }
       },
       wire: {
         viewSchema: JSON_SCHEMA,
@@ -533,6 +541,7 @@ export function apply(ctx, rawConfig) {
             model: state.model,
             at: state.at,
             mode: state.mode,
+            reason: state.reason,
           })
           return {
             turn: state.turn,
@@ -540,42 +549,93 @@ export function apply(ctx, rawConfig) {
             model: state.model,
             at: state.at,
             mode: state.mode,
+            reason: state.reason,
           }
         },
       },
     })
+  })
 
-    scoped.on('agent/turn-stopping', async (payload) => {
-      try {
-        const session = payload?.agent?.session
-        if (session === undefined) return
-        if (config.skipSubagents && (session.header?.origin === 'subagent' || session.header?.parentSession !== undefined)) {
-          return
-        }
-        const turn = payload.turn
-        if (typeof turn !== 'number') return
-        const result = await predictionForTurn(scoped, session, turn, config, payload.signal)
-        if (result === undefined) return
-        // The session is live by construction here: `turn-stopping` is emitted
-        // by its running Agent. `session/disposed` cleans any late entry.
-        const key = String(session.id)
-        let byTurn = pending.get(key)
-        if (byTurn === undefined) {
-          byTurn = new Map()
-          pending.set(key, byTurn)
-        }
-        byTurn.set(turn, { text: result.text, model: result.model, mode: result.mode, at: Date.now() })
-      } catch (error) {
-        // A failing prediction must never fail the turn it follows.
-        scoped.logger?.warn?.('prompt-forecast: prediction failed: %o', error)
+  // One attempt per session turn. Both the root observer and the per-agent
+  // listener may be installed; this keeps them from calling the model twice.
+  const handledTurns = new Set()
+  const attachedAgents = new Map()
+
+  async function onTurnStopping(payload) {
+    try {
+      const session = payload?.agent?.session
+      if (session === undefined) return
+      if (config.skipSubagents && (session.header?.origin === 'subagent' || session.header?.parentSession !== undefined)) {
+        return
       }
-    })
+      const turn = payload.turn
+      if (typeof turn !== 'number') return
+      const activeKey = `${session.id}:${turn}`
+      if (handledTurns.has(activeKey)) return
+      handledTurns.add(activeKey)
+      const key = String(session.id)
+      let byTurn = pending.get(key)
+      if (byTurn === undefined) {
+        byTurn = new Map()
+        pending.set(key, byTurn)
+      }
+      if (ctx.get('llm') === undefined) {
+        byTurn.set(turn, { text: '', model: '', mode: '', reason: 'no-llm', at: Date.now() })
+        return
+      }
+      const result = await predictionForTurn(ctx, session, turn, config, payload.signal)
+      if (result === undefined) {
+        // Record the attempt so the projection checkpoint shows that the hook
+        // fired and the predictor (not the wiring) produced nothing.
+        byTurn.set(turn, { text: '', model: '', mode: '', reason: 'no-prediction', at: Date.now() })
+        return
+      }
+      // The session is live by construction here: `turn-stopping` is emitted
+      // by its running Agent. `session/disposed` cleans any late entry.
+      byTurn.set(turn, { text: result.text, model: result.model, mode: result.mode, reason: '', at: Date.now() })
+    } catch (error) {
+      // A failing prediction must never fail the turn it follows.
+      ctx.logger?.warn?.('prompt-forecast: prediction failed: %o', error)
+    }
+  }
 
-    scoped.on('session/disposed', (session) => {
-      pending.delete(String(session.id))
-      // A reopened session restores its projection from the checkpoint row,
-      // which repopulates the module store on the next view.
-      producedPredictions.delete(String(session.id))
-    })
+  /** Attach the turn hook to one exact Agent through its own context. */
+  function attachAgent(agent) {
+    if (agent?.ctx === undefined || typeof agent.ctx.on !== 'function') return
+    const key = String(agent.id)
+    if (attachedAgents.has(key)) return
+    attachedAgents.set(key, agent.ctx.on('agent/turn-stopping', onTurnStopping))
+  }
+
+  // Root observer: receives already-live agents' turns in the common case.
+  ctx.on('agent/turn-stopping', onTurnStopping)
+
+  // Per-agent registration is the scope-safe path: `agent/turn-stopping` is
+  // dispatched with the agent's scope, and agents created before this plugin
+  // loaded are covered by `agents.list()`.
+  ctx.inject(['agents'], (scoped) => {
+    const agents = scoped.agents ?? scoped.get?.('agents')
+    if (agents === undefined || typeof agents.list !== 'function') return
+    for (const agent of agents.list()) attachAgent(agent)
+  })
+  ctx.on('agent/created', ({ agent }) => attachAgent(agent))
+  ctx.on('agent/disposed', ({ agent }) => {
+    const key = String(agent.id)
+    const dispose = attachedAgents.get(key)
+    if (dispose !== undefined) {
+      dispose()
+      attachedAgents.delete(key)
+    }
+  })
+
+  ctx.on('session/disposed', (session) => {
+    const prefix = `${session.id}:`
+    for (const key of handledTurns) {
+      if (key.startsWith(prefix)) handledTurns.delete(key)
+    }
+    pending.delete(String(session.id))
+    // A reopened session restores its projection from the checkpoint row,
+    // which repopulates the module store on the next view.
+    producedPredictions.delete(String(session.id))
   })
 }

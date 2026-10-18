@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-prompt-forecast",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "private": true,
   "type": "module",
   "description": "Ghost-text next-action prediction in the DeepSeek Harness Web composer, accepted with Tab or Right Arrow.",

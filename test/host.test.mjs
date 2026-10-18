@@ -31,6 +31,26 @@ function fakeSession(events) {
   }
 }
 
+/**
+ * Plugin root context double. Event listeners must land on the root (the real
+ * `agent/turn-stopping` is scope-filtered), while injection delegates to the
+ * scoped service fake.
+ */
+function rootContext(scoped, listeners) {
+  return {
+    inject: (_names, callback) => callback(scoped),
+    on(name, listener) {
+      listeners[name] = listener
+      return () => {}
+    },
+    get(name) {
+      return name === 'llm' ? scoped.llm : scoped.get?.(name)
+    },
+    llm: scoped.llm,
+    logger: scoped.logger ?? { warn() {} },
+  }
+}
+
 test('resolveConfig supplies every default', () => {
   const config = resolveConfig(undefined)
   assert.equal(config.enabled, true)
@@ -235,7 +255,7 @@ test('one completed turn publishes the prediction and the next turn without one 
     },
     logger: { warn() {} },
   }
-  apply({ inject: (_names, callback) => callback(scoped) }, { mode: 'digest', timeoutMs: 1000 })
+  apply(rootContext(scoped, listeners), { mode: 'digest', timeoutMs: 1000 })
 
   assert.ok(definition !== undefined)
   let state = definition.init({ id: 'session-2' })
@@ -284,7 +304,7 @@ test('an aborted turn keeps the previous prediction', async () => {
     },
     logger: { warn() {} },
   }
-  apply({ inject: (_names, callback) => callback(scoped) }, {})
+  apply(rootContext(scoped, {}), {})
   const state = definition.apply(definition.init({ id: 'session-3' }), {
     type: 'turn/end',
     data: { turn: 1, reason: { kind: 'completed' } },
@@ -389,7 +409,7 @@ test('fork mode sends the parent transcript and the synthetic turn', async () =>
     },
     logger: { warn() {} },
   }
-  apply({ inject: (_names, callback) => callback(scoped) }, { mode: 'fork', timeoutMs: 1000 })
+  apply(rootContext(scoped, listeners), { mode: 'fork', timeoutMs: 1000 })
   let state = definition.init({ id: 'session-4' })
   await listeners['agent/turn-stopping']({ agent: { session }, turn: 1 })
 
@@ -452,7 +472,7 @@ test('fork mode falls back to the digest when the fork yields no text', async ()
     },
     logger: { warn() {} },
   }
-  apply({ inject: (_names, callback) => callback(scoped) }, { mode: 'fork', timeoutMs: 1000, fallback: true })
+  apply(rootContext(scoped, listeners), { mode: 'fork', timeoutMs: 1000, fallback: true })
   let state = definition.init({ id: 'session-5' })
   await listeners['agent/turn-stopping']({ agent: { session }, turn: 1 })
   assert.equal(calls, 2)

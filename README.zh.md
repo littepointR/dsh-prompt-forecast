@@ -95,7 +95,7 @@ dsh web
 固定到已打标签的版本：
 
 ```bash
-dsh plugin --profile web add github:littepointR/dsh-prompt-forecast#v0.2.2
+dsh plugin --profile web add github:littepointR/dsh-prompt-forecast#v0.2.3
 ```
 
 Desktop 应用的 `desktop` profile 由 Electron 独占，CLI 会拒绝

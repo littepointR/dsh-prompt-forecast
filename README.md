@@ -124,7 +124,7 @@ needs no extra pnpm build approval.
 To pin the tagged release:
 
 ```bash
-dsh plugin --profile web add github:littepointR/dsh-prompt-forecast#v0.2.2
+dsh plugin --profile web add github:littepointR/dsh-prompt-forecast#v0.2.3
 ```
 
 The Desktop application's `desktop` profile is reserved for the Electron app, so
